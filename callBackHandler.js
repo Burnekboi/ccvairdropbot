@@ -338,7 +338,7 @@ ${allocationLine}
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
-              [{ text: "🌐 Visit Presale Page", url: "https://www.cucumverse.space" }],
+              [{ text: "🌐 Visit Presale Page", url: process.env.PRESALE_URL }],
               [{ text: "💼 Submit Presale Wallet", callback_data: "submit_presale_wallet" }],
               [{ text: "⬅️ Back", callback_data: "back_main" }]
             ]
