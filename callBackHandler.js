@@ -324,19 +324,14 @@ Please send your Solana wallet address now:`,
 ━━━━━━━━━━━━━━━━━━
 💰 *Presale Reward Points*
 
-• 🪙 0.1–0.4 SOL = +50 pts
-• 💰 0.5–0.9 SOL = +250 pts
-• 🏆 1 SOL+ = +600 pts
+• 🪙 13500 CCV = +50 pts
+• 💰 150000 CCV = +250 pts
+• 🏆 500000 CCV = +600 pts
 
 ━━━━━━━━━━━━━━━━━━
-📥 *Send SOL to:*
-\`CgE99V3nK2GG5wH15SpMj29rYyY5syKX9DTHXP7JnBx8\`
-
-📥 *Send ETH to:*
-\`0xfc357452c4e4e039888527258b801ae7af9fb84a\`
 ${allocationLine}
 ━━━━━━━━━━━━━━━━━━
-⚠️ *Important:* Use the same wallet you submitted for rewards when joining the presale. Using a different wallet will cause verification to fail and your presale participation won't be recognized.`,
+⚠️ *Important:* Paste your wallet address in Submit Presale Wallet for verification and Points`,
         {
           chat_id: chatId,
           message_id: query.message.message_id,
