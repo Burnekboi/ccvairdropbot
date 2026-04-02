@@ -67,6 +67,7 @@ function captchaKeyboard(correctAnswer) {
 // ─── Main export ─────────────────────────────────────────────────────────────
 
 const mongoose = require("mongoose");
+const PresalePurchase = require("./models/PresalePurchase");
 
 // Shared collection — written by cucumber bot, read here for verification
 const DeployedToken = mongoose.models.DeployedToken ||
@@ -82,8 +83,9 @@ const DeployedToken = mongoose.models.DeployedToken ||
 module.exports = (bot, User) => {
 
   // State maps
-  const captchaPending = new Map();   // chatId -> { answer, attempts }
-  const awaitingWallet = new Set();   // chatId waiting to type wallet
+  const captchaPending = new Map();
+  const awaitingWallet = new Set();
+  const awaitingPresaleWallet = new Set();
 
   // ── Exposed helpers for app.js ──────────────────────────────────────────
 
@@ -112,7 +114,74 @@ To continue, solve this simple math problem:
     const text = msg.text?.trim();
     if (!text) return;
 
-    // ── WALLET SUBMISSION STEP ────────────────────────────────────────────
+    // ── PRESALE WALLET SUBMISSION ─────────────────────────────────────────
+    if (awaitingPresaleWallet.has(chatId)) {
+      const isSolana = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
+      const isEVM    = /^0x[a-fA-F0-9]{40}$/.test(text);
+
+      if (!isSolana && !isEVM) {
+        return bot.sendMessage(chatId,
+          "❌ Invalid address. Send a valid Solana or ETH (0x...) wallet address."
+        );
+      }
+
+      awaitingPresaleWallet.delete(chatId);
+      const user = await User.findOne({ chatId });
+      if (!user) return;
+
+      // Check if already claimed by another user
+      const record = await PresalePurchase.findOne({ presaleWallet: text });
+
+      if (!record) {
+        return bot.sendMessage(chatId,
+          "❌ No presale purchase found for this wallet.\n\nMake sure you completed a purchase on *cucumverse.space* first.",
+          { parse_mode: "Markdown" }
+        );
+      }
+
+      if (record.claimed && record.chatId !== chatId) {
+        return bot.sendMessage(chatId, "❌ This wallet is already linked to another account.");
+      }
+
+      if (record.claimed && record.chatId === chatId) {
+        return bot.sendMessage(chatId,
+          `⚠️ You already verified this presale wallet.\n\n🪙 Your allocation: *${record.ccvAllocation.toLocaleString()} CCV*`,
+          { parse_mode: "Markdown" }
+        );
+      }
+
+      // Award points based on SOL spent
+      let bonusPoints = 0;
+      if (record.solAmount >= 1)        bonusPoints = 600;
+      else if (record.solAmount >= 0.5) bonusPoints = 250;
+      else if (record.solAmount > 0)    bonusPoints = 50;
+
+      record.claimed = true;
+      record.chatId  = chatId;
+      await record.save();
+
+      if (!user.tasks.joinedPresale) {
+        user.tasks.joinedPresale = true;
+        user.points += 20;
+      }
+      if (bonusPoints > 0) user.points += bonusPoints;
+      await user.save();
+
+      return bot.sendMessage(chatId,
+`✅ *Presale wallet verified!*
+
+💼 \`${text}\`
+💰 SOL Spent: *${record.solAmount} SOL*
+🪙 CCV Allocation: *${record.ccvAllocation.toLocaleString()} CCV*
+🎁 Points Awarded: *+${20 + bonusPoints}*
+
+Your token allocation is reserved. Tokens will be distributed after TGE. 🚀`,
+        { parse_mode: "Markdown" }
+      );
+    }
+
+    // ── REWARDS WALLET SUBMISSION ─────────────────────────────────────────
+    // ── REWARDS WALLET SUBMISSION ─────────────────────────────────────────
     if (awaitingWallet.has(chatId)) {
       // Solana address: base58, 32–44 chars
       const isSolana = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
@@ -239,6 +308,11 @@ Please send your Solana wallet address now:`,
 
     // ── PRESALE ───────────────────────────────────────────────────────────
     if (action === "presale") {
+      const presaleRecord = await PresalePurchase.findOne({ chatId, claimed: true });
+      const allocationLine = presaleRecord
+        ? `\n✅ *Your Allocation:* ${presaleRecord.ccvAllocation.toLocaleString()} CCV`
+        : `\n⏳ No allocation recorded yet.`;
+
       return bot.editMessageText(
 `🚀 *Cucumverse Presale*
 
@@ -250,10 +324,17 @@ Please send your Solana wallet address now:`,
 ━━━━━━━━━━━━━━━━━━
 💰 *Presale Reward Points*
 
-• 🪙 10,000 tokens = 50 pts
-• 💰 50,000 tokens = 250 pts
-• 🏆 100,000 tokens = 600 pts
+• 🪙 0.1–0.4 SOL = +50 pts
+• 💰 0.5–0.9 SOL = +250 pts
+• 🏆 1 SOL+ = +600 pts
 
+━━━━━━━━━━━━━━━━━━
+📥 *Send SOL to:*
+\`CgE99V3nK2GG5wH15SpMj29rYyY5syKX9DTHXP7JnBx8\`
+
+📥 *Send ETH to:*
+\`0xfc357452c4e4e039888527258b801ae7af9fb84a\`
+${allocationLine}
 ━━━━━━━━━━━━━━━━━━
 ⚠️ *Important:* Use the same wallet you submitted for rewards when joining the presale. Using a different wallet will cause verification to fail and your presale participation won't be recognized.`,
         {
@@ -262,8 +343,8 @@ Please send your Solana wallet address now:`,
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
-              [{ text: "💰 Join the Presale", url: process.env.PRESALE_URL }],
-              [{ text: "✅ I Joined Presale (+20)", callback_data: "verify_presale" }],
+              [{ text: "🌐 Visit Presale Page", url: "https://www.cucumverse.space" }],
+              [{ text: "💼 Submit Presale Wallet", callback_data: "submit_presale_wallet" }],
               [{ text: "⬅️ Back", callback_data: "back_main" }]
             ]
           }
@@ -271,7 +352,24 @@ Please send your Solana wallet address now:`,
       );
     }
 
-    // ── VERIFY PRESALE ────────────────────────────────────────────────────
+    // ── SUBMIT PRESALE WALLET ─────────────────────────────────────────────
+    if (action === "submit_presale_wallet") {
+      if (user.tasks.joinedPresale) {
+        return bot.answerCallbackQuery(query.id, { text: "✅ Presale already verified.", show_alert: true });
+      }
+      awaitingPresaleWallet.add(chatId);
+      await bot.answerCallbackQuery(query.id);
+      return bot.sendMessage(chatId,
+`💼 *Submit Your Presale Wallet*
+
+Enter the wallet address you used to send SOL or ETH on *cucumverse.space*.
+
+This wallet will be permanently linked to your Telegram account — no one else can use it.`,
+        { parse_mode: "Markdown" }
+      );
+    }
+
+    // ── VERIFY PRESALE (legacy — kept for back-compat) ────────────────────
     if (action === "verify_presale") {
       if (user.tasks.joinedPresale) {
         return bot.answerCallbackQuery(query.id, { text: "⚠️ Already completed.", show_alert: false });
