@@ -1,8 +1,36 @@
 require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const mongoose = require("mongoose");
+const express = require("express");
+const cors = require("cors");
 const User = require("./models/User");
+const PresalePurchase = require("./models/PresalePurchase");
 const handleCallbacks = require("./callBackHandler");
+
+// ── Express API (for website to record presale purchases) ─────────────────────
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// Website POSTs here after a confirmed purchase
+app.post("/presale/record", async (req, res) => {
+  try {
+    const { presaleWallet, solAmount, ccvAllocation, txSignature } = req.body;
+    if (!presaleWallet || !solAmount) return res.status(400).json({ error: "Missing fields" });
+
+    await PresalePurchase.findOneAndUpdate(
+      { presaleWallet },
+      { presaleWallet, solAmount: parseFloat(solAmount), ccvAllocation: parseFloat(ccvAllocation) || 0, txSignature: txSignature || null },
+      { upsert: true }
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.listen(process.env.PORT || 3000, () => console.log("✅ API ready"));
+
 
 // ── Init bot ──────────────────────────────────────────────────────────────────
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
