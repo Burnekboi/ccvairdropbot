@@ -88,6 +88,7 @@ module.exports = (bot, User) => {
   const captchaPending = new Map();
   const awaitingWallet = new Set();
   const awaitingPresaleWallet = new Set();
+  const awaitingUpgradeTx = new Set();
 
   // ── Exposed helpers for app.js ──────────────────────────────────────────
 
@@ -115,6 +116,63 @@ To continue, solve this simple math problem:
     if (msg.from?.is_bot) return;
     const text = msg.text?.trim();
     if (!text) return;
+
+    // ── UPGRADE TX SUBMISSION ─────────────────────────────────────────────
+    if (awaitingUpgradeTx.has(chatId)) {
+      awaitingUpgradeTx.delete(chatId);
+      const txSig = text.trim();
+
+      await bot.sendMessage(chatId, "⏳ Verifying your transaction...");
+
+      try {
+        const rpc  = "https://api.mainnet-beta.solana.com";
+        const resp = await fetch(rpc, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0", id: 1,
+            method: "getTransaction",
+            params: [txSig, { encoding: "jsonParsed", commitment: "confirmed" }]
+          })
+        });
+        const data = await resp.json();
+        const tx   = data?.result;
+
+        if (!tx) {
+          return bot.sendMessage(chatId, "❌ Transaction not found or not confirmed yet. Wait a moment and try again.");
+        }
+
+        const instructions = tx?.transaction?.message?.instructions || [];
+        const upgradeAddr  = (process.env.UPGRADE_SOL_ADDRESS || "").trim();
+        const MIN_LAMPORTS = 45000000; // 0.045 SOL min
+
+        const valid = instructions.some(ix => {
+          if (ix.program !== "system") return false;
+          const info = ix.parsed?.info;
+          return info?.destination === upgradeAddr && parseInt(info?.lamports) >= MIN_LAMPORTS;
+        });
+
+        if (!valid) {
+          return bot.sendMessage(chatId,
+            "❌ Payment not verified. Make sure you sent *0.05 SOL* to the correct address and try again.",
+            { parse_mode: "Markdown" }
+          );
+        }
+
+        const user = await User.findOne({ chatId });
+        if (!user) return;
+        user.hashData.upgraded = true;
+        await user.save();
+
+        return bot.sendMessage(chatId,
+          "✅ *Hash Machine Upgraded!*\n\nYou now earn *5–20 pts* per hash. Enjoy the boost! ⚡",
+          { parse_mode: "Markdown" }
+        );
+      } catch (err) {
+        console.error("[upgrade_tx]", err.message);
+        return bot.sendMessage(chatId, "❌ Could not verify transaction. Try again later.");
+      }
+    }
 
     // ── PRESALE WALLET SUBMISSION ─────────────────────────────────────────
     if (awaitingPresaleWallet.has(chatId)) {
@@ -667,7 +725,50 @@ This airdrop won't last forever. Once the allocation is filled, rewards will be 
       );
     }
 
-    // ── DAILY REWARDS ─────────────────────────────────────────────────────
+    // ── UPGRADE HASH MACHINE ──────────────────────────────────────────────
+    if (action === "upgrade_hash") {
+      if (user.hashData?.upgraded) {
+        return bot.answerCallbackQuery(query.id, { text: "✅ Already upgraded!", show_alert: true });
+      }
+      await bot.answerCallbackQuery(query.id);
+      return bot.editMessageText(
+`⚡ *Upgrade Hash Machine*
+
+Unlock higher point rewards permanently!
+
+💰 *Upgraded Rewards:*
+• 5–10 pts = 50% chance
+• 11–15 pts = 35% chance
+• 16–20 pts = 15% chance
+
+━━━━━━━━━━━━━━━━━━
+📥 Send *0.05 SOL* to:
+\`${process.env.UPGRADE_SOL_ADDRESS}\`
+
+After sending, paste your transaction signature below by clicking *Submit TX*.`,
+        {
+          chat_id: chatId,
+          message_id: query.message.message_id,
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "✅ Submit TX Signature", callback_data: "submit_upgrade_tx" }],
+              [{ text: "⬅️ Back", callback_data: "hash_points" }]
+            ]
+          }
+        }
+      );
+    }
+
+    // ── SUBMIT UPGRADE TX ─────────────────────────────────────────────────
+    if (action === "submit_upgrade_tx") {
+      awaitingUpgradeTx.add(chatId);
+      await bot.answerCallbackQuery(query.id);
+      return bot.sendMessage(chatId,
+        "🔑 Paste your Solana transaction signature (the TX hash from your wallet after sending 0.05 SOL):",
+        { parse_mode: "Markdown" }
+      );
+    }
     if (action === "daily_rewards") {
       // Reset count if it's a new day
       const now = new Date();
@@ -709,13 +810,14 @@ Welcome to Hash Points, where you can elevate your points just by hashing!
       }
 
       await bot.answerCallbackQuery(query.id);
+      const upgraded = user.hashData?.upgraded || false;
       return bot.editMessageText(
 `🔑 *Hash Points*
 
 Tap the button below to open the hashing app on your device.
 Your device will search a range of keys and earn you points!
 
-💰 *Reward:* 5 – 75 points per hash
+💰 *Reward:* ${upgraded ? "5–20 pts (Upgraded ✅)" : "1–10 pts"}
 ⛏ *No daily limit — hash as much as you want!*`,
         {
           chat_id: chatId,
@@ -724,6 +826,7 @@ Your device will search a range of keys and earn you points!
           reply_markup: {
             inline_keyboard: [
               [{ text: "⛏ Open Hash App", web_app: { url: process.env.HASH_APP_URL } }],
+              ...(!upgraded ? [[{ text: "⚡ Upgrade Hash Machine (0.05 SOL)", callback_data: "upgrade_hash" }]] : []),
               [{ text: "⬅️ Back", callback_data: "daily_rewards" }]
             ]
           }
