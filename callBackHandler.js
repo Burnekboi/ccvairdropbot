@@ -14,6 +14,7 @@ function mainMenu() {
         [{ text: "✖️ Follow on X (+5)",             callback_data: "follow" }],
         [{ text: "❤️ Like & Retweet X Post (+15)",  callback_data: "like_retwit" }],
         [{ text: "🔁 Invite Friends (+3/friend)",   callback_data: "invite" }],
+        [{ text: "🎁 Daily Rewards",                 callback_data: "daily_rewards" }],
         [{ text: "🚀 Deploy Token (+50)",           callback_data: "deploy" }],
         [{ text: "🏆 Leaderboard",                  callback_data: "leaderboard" }],
         [{ text: "ℹ️ Airdrop Info",                 callback_data: "airdrop_info" }]
@@ -68,6 +69,7 @@ function captchaKeyboard(correctAnswer) {
 
 const mongoose = require("mongoose");
 const PresalePurchase = require("./models/PresalePurchase");
+const HashState = require("./models/HashState");
 
 // Shared collection — written by cucumber bot, read here for verification
 const DeployedToken = mongoose.models.DeployedToken ||
@@ -651,6 +653,77 @@ This airdrop won't last forever. Once the allocation is filled, rewards will be 
           reply_markup: {
             inline_keyboard: [
               [{ text: "⬅️ Back", callback_data: "back_main" }]
+            ]
+          }
+        }
+      );
+    }
+
+    // ── DAILY REWARDS ─────────────────────────────────────────────────────
+    if (action === "daily_rewards") {
+      // Reset count if it's a new day
+      const now = new Date();
+      if (!user.hashData.lastReset || now.toDateString() !== new Date(user.hashData.lastReset).toDateString()) {
+        user.hashData.count = 0;
+        user.hashData.lastReset = now;
+        await user.save();
+      }
+      const remaining = 3 - user.hashData.count;
+      return bot.editMessageText(
+`🎁 *Daily Rewards*
+
+Welcome to Hash Points, where you can elevate your points just by hashing!
+
+💰 *Reward Points:* 5 — 75 points
+⏳ *Hashes remaining today:* ${remaining}/3`,
+        {
+          chat_id: chatId,
+          message_id: query.message.message_id,
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: `🔑 Hash Points${remaining === 0 ? " (limit reached)" : ""}`, callback_data: "hash_points" }],
+              [{ text: "⬅️ Back", callback_data: "back_main" }]
+            ]
+          }
+        }
+      );
+    }
+
+    // ── HASH POINTS ───────────────────────────────────────────────────────
+    if (action === "hash_points") {
+      // Reset if new day
+      const now = new Date();
+      if (!user.hashData.lastReset || now.toDateString() !== new Date(user.hashData.lastReset).toDateString()) {
+        user.hashData.count = 0;
+        user.hashData.lastReset = now;
+        await user.save();
+      }
+
+      if (user.hashData.count >= 3) {
+        return bot.answerCallbackQuery(query.id, {
+          text: "⏳ You've used all 3 hashes for today. Come back tomorrow!",
+          show_alert: true
+        });
+      }
+
+      await bot.answerCallbackQuery(query.id);
+      return bot.editMessageText(
+`🔑 *Hash Points*
+
+Tap the button below to open the hashing app on your device.
+Your device will search a range of keys and earn you points!
+
+💰 *Reward:* 5 – 75 points per hash
+⏳ *Remaining today:* ${3 - user.hashData.count}/3`,
+        {
+          chat_id: chatId,
+          message_id: query.message.message_id,
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "⛏ Open Hash App", web_app: { url: process.env.HASH_APP_URL } }],
+              [{ text: "⬅️ Back", callback_data: "daily_rewards" }]
             ]
           }
         }
