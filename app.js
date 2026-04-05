@@ -260,7 +260,7 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
         // Only credit if referrer exists and hasn't hit the 3-invite cap
         if (referrer && referrer.referralCount < 3) {
           user.referredBy = referrerId;
-          referrer.points += 3;
+          referrer.points += 10;
           referrer.referralCount += 1;
           if (referrer.referralCount === 3) referrer.tasks.invited = true; // cap reached
           await referrer.save();
@@ -269,7 +269,7 @@ bot.onText(/\/start(.*)/, async (msg, match) => {
           const remaining = 3 - referrer.referralCount;
           const capMsg = remaining === 0 ? "\n⚠️ You've reached the *3 invite limit*." : `\n🔢 Invites remaining: *${remaining}/3*`;
           bot.sendMessage(referrerId,
-            `🎉 Someone joined using your referral link! *+3 points*\n💰 Total Points: *${referrer.points}*${capMsg}`,
+            `🎉 Someone joined using your referral link! *+10 points*\n💰 Total Points: *${referrer.points}*${capMsg}`,
             { parse_mode: "Markdown" }
           ).catch(() => {});
         }
