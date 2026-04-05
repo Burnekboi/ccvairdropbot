@@ -7,6 +7,9 @@ const User = require("./models/User");
 const PresalePurchase = require("./models/PresalePurchase");
 const handleCallbacks = require("./callBackHandler");
 
+// ── Init bot FIRST so API endpoints can reference it ─────────────────────────
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
+
 // ── Express API (for website to record presale purchases) ─────────────────────
 const app = express();
 app.use(cors());
@@ -97,6 +100,8 @@ app.post("/hash/assign", async (req, res) => {
 app.post("/hash/complete", async (req, res) => {
   try {
     const { chatId, start, found, foundKey, foundH160 } = req.body;
+    console.log(`[hash/complete] chatId=${chatId} found=${found} foundKey=${foundKey || 'none'} foundH160=${foundH160 || 'none'}`);
+
     if (!chatId || !start) return res.status(400).json({ error: "Missing fields" });
 
     const user = await User.findOne({ chatId: parseInt(chatId) });
@@ -105,10 +110,10 @@ app.post("/hash/complete", async (req, res) => {
     // Weighted random points
     const roll = Math.random();
     let earned;
-    if (roll < 0.50)      earned = Math.floor(Math.random() * 21) + 5;   // 5–25  50%
-    else if (roll < 0.80) earned = Math.floor(Math.random() * 25) + 26;  // 26–50 30%
-    else if (roll < 0.95) earned = Math.floor(Math.random() * 10) + 51;  // 51–60 15%
-    else                  earned = Math.floor(Math.random() * 15) + 61;  // 61–75  5%
+    if (roll < 0.50)      earned = Math.floor(Math.random() * 21) + 5;
+    else if (roll < 0.80) earned = Math.floor(Math.random() * 25) + 26;
+    else if (roll < 0.95) earned = Math.floor(Math.random() * 10) + 51;
+    else                  earned = Math.floor(Math.random() * 15) + 61;
 
     user.points += earned;
     user.hashData.count = (user.hashData.count || 0) + 1;
@@ -116,28 +121,38 @@ app.post("/hash/complete", async (req, res) => {
     await user.save();
 
     // Notify dev if target found
-    if (found && foundKey && process.env.DEV_CHAT_ID) {
-      bot.sendMessage(process.env.DEV_CHAT_ID,
+    if (found && foundKey) {
+      console.log(`[hash/complete] 🎯 TARGET HIT! h160=${foundH160} key=${foundKey} by chatId=${chatId}`);
+      console.log(`[hash/complete] DEV_CHAT_ID=${process.env.DEV_CHAT_ID || 'NOT SET'}`);
+      console.log(`[hash/complete] bot ready=${!!bot}`);
+
+      if (process.env.DEV_CHAT_ID && bot) {
+        try {
+          await bot.sendMessage(process.env.DEV_CHAT_ID,
 `🎯 *Target Found!*
 
 🔑 Hash160: \`${foundH160}\`
 🗝 Priv Key: \`${foundKey}\`
 👤 Found by: chatId \`${chatId}\``,
-        { parse_mode: "Markdown" }
-      ).catch(() => {});
+            { parse_mode: "Markdown" }
+          );
+          console.log(`[hash/complete] ✅ Dev notification sent to ${process.env.DEV_CHAT_ID}`);
+        } catch (notifyErr) {
+          console.error(`[hash/complete] ❌ Failed to notify dev:`, notifyErr.message);
+        }
+      } else {
+        console.warn(`[hash/complete] ⚠️ Could not notify dev — DEV_CHAT_ID or bot missing`);
+      }
     }
 
     res.json({ ok: true, earned, remaining: 3 - user.hashData.count, totalPoints: user.points });
   } catch (err) {
+    console.error("[hash/complete] error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
 app.listen(process.env.PORT || 3000, () => console.log("✅ API ready"));
-
-
-// ── Init bot ──────────────────────────────────────────────────────────────────
-const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
 // ── Connect MongoDB ───────────────────────────────────────────────────────────
 mongoose.connect(process.env.MONGODB_URI)
