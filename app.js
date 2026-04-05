@@ -54,7 +54,8 @@ app.get("/hash/state", async (req, res) => {
     if (!user.hashData?.lastReset || now.toDateString() !== new Date(user.hashData.lastReset).toDateString()) {
       count = 0;
     }
-    res.json({ remaining: 99, hashCount: count, totalPoints: user.points });
+    const limit = user.hashData?.upgraded ? 5 : 3;
+    res.json({ remaining: limit - count, hashCount: count, limit, upgraded: !!user.hashData?.upgraded, totalPoints: user.points });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -77,7 +78,11 @@ app.post("/hash/assign", async (req, res) => {
       user.hashData.lastReset = now;
       await user.save();
     }
-    // No limit — claim chunk freely
+    // Enforce daily limit (3 base, 5 upgraded)
+    const limit = user.hashData?.upgraded ? 5 : 3;
+    if (user.hashData.count >= limit) {
+      return res.json({ ok: false, error: `Daily limit reached (${limit}/day). Come back tomorrow!` });
+    }
 
     // Claim chunk atomically
     let state = await HashState.findById("global");
@@ -204,7 +209,8 @@ app.post("/hash/complete", async (req, res) => {
       }
     }
 
-    res.json({ ok: true, earned, hashCount: user.hashData.count, totalPoints: user.points });
+    const limit = user.hashData?.upgraded ? 5 : 3;
+    res.json({ ok: true, earned, remaining: limit - user.hashData.count, limit, hashCount: user.hashData.count, totalPoints: user.points });
   } catch (err) {
     console.error("[hash/complete] error:", err.message);
     res.status(500).json({ error: err.message });
