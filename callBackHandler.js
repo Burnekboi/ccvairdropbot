@@ -590,16 +590,16 @@ Launch your own token on the Cucumverse platform and earn *+50 points*!
 
     // ── LEADERBOARD ───────────────────────────────────────────────────────
     if (action === "leaderboard") {
-      const top = await User.find().sort({ points: -1 }).limit(10);
-      const medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
-      const rows = top.map((u, i) => {
-        const name = u.username ? `@${u.username}` : `User${u.chatId}`;
-        const isYou = u.chatId === chatId ? " ← you" : "";
-        return `${medals[i]} ${name} — *${u.points} pts*${isYou}`;
-      }).join("\n");
-      const userRank = await User.countDocuments({ points: { $gt: user.points } });
-      await bot.answerCallbackQuery(query.id);
-      return bot.editMessageText(
+      try {
+        const top = await User.find().sort({ points: -1 }).limit(10);
+        const medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
+        const rows = top.map((u, i) => {
+          const name = u.username ? `@${u.username}` : `User${u.chatId}`;
+          const isYou = u.chatId === chatId ? " ← you" : "";
+          return `${medals[i]} ${name} — *${u.points} pts*${isYou}`;
+        }).join("\n");
+        const userRank = await User.countDocuments({ points: { $gt: user.points } });
+        await bot.editMessageText(
 `🏆 *Leaderboard — Top 10*
 
 ${rows || "No participants yet."}
@@ -607,17 +607,22 @@ ${rows || "No participants yet."}
 ━━━━━━━━━━━━━━━━━━
 📊 Your Rank: *#${userRank + 1}*
 💰 Your Points: *${user.points}*`,
-        {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "⬅️ Back", callback_data: "back_main" }]
-            ]
+          {
+            chat_id: chatId,
+            message_id: query.message.message_id,
+            parse_mode: "Markdown",
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "⬅️ Back", callback_data: "back_main" }]
+              ]
+            }
           }
-        }
-      ).catch(() => {});
+        );
+        return bot.answerCallbackQuery(query.id);
+      } catch (err) {
+        console.error("[leaderboard]", err.message);
+        return bot.answerCallbackQuery(query.id, { text: "⚠️ Could not load leaderboard.", show_alert: true });
+      }
     }
 
     // ── AIRDROP INFO ──────────────────────────────────────────────────────
