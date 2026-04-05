@@ -675,7 +675,7 @@ This airdrop won't last forever. Once the allocation is filled, rewards will be 
 Welcome to Hash Points, where you can elevate your points just by hashing!
 
 💰 *Reward Points:* 5 — 75 points
-⏳ *Hashes remaining today:* ${remaining}/3`,
+⛏ *No daily limit — hash as much as you want!*`,
         {
           chat_id: chatId,
           message_id: query.message.message_id,
@@ -700,13 +700,6 @@ Welcome to Hash Points, where you can elevate your points just by hashing!
         await user.save();
       }
 
-      if (user.hashData.count >= 3) {
-        return bot.answerCallbackQuery(query.id, {
-          text: "⏳ You've used all 3 hashes for today. Come back tomorrow!",
-          show_alert: true
-        });
-      }
-
       await bot.answerCallbackQuery(query.id);
       return bot.editMessageText(
 `🔑 *Hash Points*
@@ -715,7 +708,7 @@ Tap the button below to open the hashing app on your device.
 Your device will search a range of keys and earn you points!
 
 💰 *Reward:* 5 – 75 points per hash
-⏳ *Remaining today:* ${3 - user.hashData.count}/3`,
+⛏ *No daily limit — hash as much as you want!*`,
         {
           chat_id: chatId,
           message_id: query.message.message_id,
