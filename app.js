@@ -7,6 +7,11 @@ const User = require("./models/User");
 const PresalePurchase = require("./models/PresalePurchase");
 const handleCallbacks = require("./callBackHandler");
 
+// Prevent unhandled Telegram API errors from crashing the process
+process.on("unhandledRejection", (err) => {
+  console.warn("[unhandledRejection]", err?.message || err);
+});
+
 // ── Init bot FIRST so API endpoints can reference it ─────────────────────────
 const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
