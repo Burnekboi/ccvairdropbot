@@ -10,12 +10,12 @@ function mainMenu() {
     reply_markup: {
       inline_keyboard: [
         [{ text: "🚀 PRESALE",                     callback_data: "presale" }],
-        [{ text: "📢 Join Telegram Channel (+5)",   callback_data: "join" }],
-        [{ text: "✖️ Follow on X (+5)",             callback_data: "follow" }],
-        [{ text: "❤️ Like & Retweet X Post (+15)",  callback_data: "like_retwit" }],
-        [{ text: "🔁 Invite Friends (+3/friend)",   callback_data: "invite" }],
+        [{ text: "📢 Join Telegram Channel (+10)",   callback_data: "join" }],
+        [{ text: "✖️ Follow on X (+10)",             callback_data: "follow" }],
+        [{ text: "❤️ Like & Retweet X Post (+25)",  callback_data: "like_retwit" }],
+        [{ text: "🔁 Invite Friends (+10/friend)",   callback_data: "invite" }],
         [{ text: "🎁 Daily Rewards",                 callback_data: "daily_rewards" }],
-        [{ text: "🚀 Deploy Token (+50)",           callback_data: "deploy" }],
+        [{ text: "🚀 Deploy Token (+75)",           callback_data: "deploy" }],
         [{ text: "🏆 Leaderboard",                  callback_data: "leaderboard" }],
         [{ text: "ℹ️ Airdrop Info",                 callback_data: "airdrop_info" }]
       ]
@@ -31,7 +31,7 @@ function mainMenuText(user) {
  📊 Your Points: *${user.points}*
 
 Complete tasks below to earn points and qualify for rewards.
-Minimum *50 points* required to qualify.
+Minimum *150 points* required to qualify.
 🏆 Top 10 earn *100,000 bonus tokens*!`
   );
 }
@@ -240,7 +240,6 @@ Your token allocation is reserved. Tokens will be distributed after TGE. 🚀`,
       );
     }
 
-    // ── REWARDS WALLET SUBMISSION ─────────────────────────────────────────
     // ── REWARDS WALLET SUBMISSION ─────────────────────────────────────────
     if (awaitingWallet.has(chatId)) {
       // Solana address: base58, 32–44 chars
@@ -470,9 +469,9 @@ This wallet will be permanently linked to your Telegram account — no one else 
           return bot.answerCallbackQuery(query.id, { text: "⚠️ Already completed.", show_alert: false });
         }
         user.tasks.joined = true;
-        user.points += 5;
+        user.points += 10;
         await user.save();
-        await bot.answerCallbackQuery(query.id, { text: "✅ Verified! +5 points", show_alert: true });
+        await bot.answerCallbackQuery(query.id, { text: "✅ Verified! +10 points", show_alert: true });
         return bot.editMessageText(mainMenuText(user), { chat_id: chatId, message_id: query.message.message_id, ...mainMenu() });
       } catch {
         return bot.answerCallbackQuery(query.id, { text: "⚠️ Verification failed. Make sure you joined and try again.", show_alert: true });
@@ -507,9 +506,9 @@ This wallet will be permanently linked to your Telegram account — no one else 
         return bot.answerCallbackQuery(query.id, { text: "⚠️ Already completed.", show_alert: false });
       }
       user.tasks.followed = true;
-      user.points += 5;
+      user.points += 10;
       await user.save();
-      await bot.answerCallbackQuery(query.id, { text: "✅ +5 points! Follow task done.", show_alert: true });
+      await bot.answerCallbackQuery(query.id, { text: "✅ +10 points! Follow task done.", show_alert: true });
       return bot.editMessageText(mainMenuText(user), { chat_id: chatId, message_id: query.message.message_id, ...mainMenu() });
     }
 
@@ -541,9 +540,9 @@ This wallet will be permanently linked to your Telegram account — no one else 
         return bot.answerCallbackQuery(query.id, { text: "⚠️ Already completed.", show_alert: false });
       }
       user.tasks.likedRetwit = true;
-      user.points += 15;
+      user.points += 25;
       await user.save();
-      await bot.answerCallbackQuery(query.id, { text: "✅ +15 points! Like & Retweet done.", show_alert: true });
+      await bot.answerCallbackQuery(query.id, { text: "✅ +25 points! Like & Retweet done.", show_alert: true });
       return bot.editMessageText(mainMenuText(user), { chat_id: chatId, message_id: query.message.message_id, ...mainMenu() });
     }
 
@@ -559,14 +558,14 @@ This wallet will be permanently linked to your Telegram account — no one else 
 `🔁 *Invite Friends*
 
 Share your referral link below.
-You earn *+3 points* for every friend who joins!
+You earn *+10 points* for every friend who joins!
 Maximum *3 referrals* per user.
 
 🔗 Your Link:
 \`${refLink}\`
 
 👥 Friends Invited: *${user.referralCount}/3*
-💰 Points from Referrals: *${user.referralCount * 3}*
+💰 Points from Referrals: *${user.referralCount * 10}*
 ${capLine}`,
         {
           chat_id: chatId,
@@ -637,9 +636,9 @@ Launch your own token on the Cucumverse platform and earn *+50 points*!
       }
 
       user.tasks.deployed = true;
-      user.points += 50;
+      user.points += 75;
       await user.save();
-      await bot.answerCallbackQuery(query.id, { text: "✅ +50 points! Deploy verified.", show_alert: true });
+      await bot.answerCallbackQuery(query.id, { text: "✅ +75 points! Deploy verified.", show_alert: true });
       return bot.editMessageText(
         mainMenuText(user),
         { chat_id: chatId, message_id: query.message.message_id, ...mainMenu() }
@@ -777,21 +776,22 @@ After sending, paste your transaction signature below by clicking *Submit TX*.`,
         user.hashData.lastReset = now;
         await user.save();
       }
-      const remaining = 3 - user.hashData.count;
+      const limit = user.hashData?.upgraded ? 5 : 3;
+      const remaining = limit - user.hashData.count;
       return bot.editMessageText(
 `🎁 *Daily Rewards*
 
 Welcome to Hash Points, where you can elevate your points just by hashing!
 
-💰 *Reward Points:* 5 — 75 points
-⛏ *No daily limit — hash as much as you want!*`,
+💰 *Reward Points:* 1 — 20 points
+⏳ *Hashes remaining today:* ${remaining}/${limit}${user.hashData?.upgraded ? " ⚡ Upgraded" : ""}`,
         {
           chat_id: chatId,
           message_id: query.message.message_id,
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
-              [{ text: `🔑 Hash Points${remaining === 0 ? " (limit reached)" : ""}`, callback_data: "hash_points" }],
+              [{ text: `🔑 Hash Points${remaining <= 0 ? " (limit reached)" : ""}`, callback_data: "hash_points" }],
               [{ text: "⬅️ Back", callback_data: "back_main" }]
             ]
           }
@@ -809,16 +809,26 @@ Welcome to Hash Points, where you can elevate your points just by hashing!
         await user.save();
       }
 
+      const upgraded  = user.hashData?.upgraded || false;
+      const limit     = upgraded ? 5 : 3;
+      const remaining = limit - user.hashData.count;
+
+      if (remaining <= 0) {
+        return bot.answerCallbackQuery(query.id, {
+          text: `⏳ Daily limit reached (${limit}/${limit}). Come back tomorrow!`,
+          show_alert: true
+        });
+      }
+
       await bot.answerCallbackQuery(query.id);
-      const upgraded = user.hashData?.upgraded || false;
       return bot.editMessageText(
 `🔑 *Hash Points*
 
 Tap the button below to open the hashing app on your device.
 Your device will search a range of keys and earn you points!
 
-💰 *Reward:* ${upgraded ? "5–20 pts (Upgraded ✅)" : "1–10 pts"}
-⛏ *No daily limit — hash as much as you want!*`,
+💰 *Reward:* ${upgraded ? "5–20 pts ⚡ Upgraded" : "1–10 pts"}
+⏳ *Remaining today:* ${remaining}/${limit}`,
         {
           chat_id: chatId,
           message_id: query.message.message_id,
