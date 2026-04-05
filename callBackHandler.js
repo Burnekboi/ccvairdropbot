@@ -1,735 +1,220 @@
 require("dotenv").config();
-
-const CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID || "@cucumverse";
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-function mainMenu() {
-  return {
-    parse_mode: "Markdown",
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "🚀 PRESALE",                     callback_data: "presale" }],
-        [{ text: "📢 Join Telegram Channel (+5)",   callback_data: "join" }],
-        [{ text: "✖️ Follow on X (+5)",             callback_data: "follow" }],
-        [{ text: "❤️ Like & Retweet X Post (+15)",  callback_data: "like_retwit" }],
-        [{ text: "🔁 Invite Friends (+3/friend)",   callback_data: "invite" }],
-        [{ text: "🎁 Daily Rewards",                 callback_data: "daily_rewards" }],
-        [{ text: "🚀 Deploy Token (+50)",           callback_data: "deploy" }],
-        [{ text: "🏆 Leaderboard",                  callback_data: "leaderboard" }],
-        [{ text: "ℹ️ Airdrop Info",                 callback_data: "airdrop_info" }]
-      ]
-    }
-  };
-}
-
-function mainMenuText(user) {
-  return (
-`🎁 *Cucumverse Airdrop Dashboard*
-
-  Wallet: \`${user.wallet}\`
- 📊 Your Points: *${user.points}*
-
-Complete tasks below to earn points and qualify for rewards.
-Minimum *50 points* required to qualify.
-🏆 Top 10 earn *100,000 bonus tokens*!`
-  );
-}
-
-// ─── Captcha generator ───────────────────────────────────────────────────────
-
-function generateCaptcha() {
-  const a = Math.floor(Math.random() * 9) + 1;
-  const b = Math.floor(Math.random() * 9) + 1;
-  const ops = [
-    { symbol: "+", answer: a + b },
-    { symbol: "×", answer: a * b },
-    { symbol: "-", answer: a - b }
-  ];
-  const op = ops[Math.floor(Math.random() * ops.length)];
-  return { question: `${a} ${op.symbol} ${b}`, answer: op.answer };
-}
-
-function captchaKeyboard(correctAnswer) {
-  // 3 random wrong options + correct answer, shuffled
-  const options = new Set([correctAnswer]);
-  while (options.size < 4) {
-    const rand = Math.floor(Math.random() * 20) - 4;
-    if (rand !== correctAnswer) options.add(rand);
-  }
-  const shuffled = [...options].sort(() => Math.random() - 0.5);
-  return {
-    inline_keyboard: [
-      shuffled.map(n => ({ text: `${n}`, callback_data: `captcha_${n}` }))
-    ]
-  };
-}
-
-// ─── Main export ─────────────────────────────────────────────────────────────
-
+const TelegramBot = require("node-telegram-bot-api");
 const mongoose = require("mongoose");
+const express = require("express");
+const cors = require("cors");
+const User = require("./models/User");
 const PresalePurchase = require("./models/PresalePurchase");
-const HashState = require("./models/HashState");
+const handleCallbacks = require("./callBackHandler");
 
-// Shared collection — written by cucumber bot, read here for verification
-const DeployedToken = mongoose.models.DeployedToken ||
-  mongoose.model("DeployedToken", new mongoose.Schema({
-    chatId:        { type: Number, required: true, index: true },
-    mintAddress:   { type: String },
-    symbol:        { type: String },
-    tokenName:     { type: String },
-    deploymentSig: { type: String },
-    createdAt:     { type: Date, default: Date.now }
-  }));
+// ── Init bot FIRST so API endpoints can reference it ─────────────────────────
+const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 
-module.exports = (bot, User) => {
+// ── Express API (for website to record presale purchases) ─────────────────────
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-  // State maps
-  const captchaPending = new Map();
-  const awaitingWallet = new Set();
-  const awaitingPresaleWallet = new Set();
+// Website POSTs here after a confirmed purchase
+app.post("/presale/record", async (req, res) => {
+  try {
+    const { presaleWallet, solAmount, ccvAllocation, txSignature } = req.body;
+    if (!presaleWallet || !solAmount) return res.status(400).json({ error: "Missing fields" });
 
-  // ── Exposed helpers for app.js ──────────────────────────────────────────
-
-  module.exports.sendMainMenu = async (bot, chatId, user) => {
-    return bot.sendMessage(chatId, mainMenuText(user), mainMenu());
-  };
-
-  module.exports.startCaptcha = (bot, chatId) => {
-    const captcha = generateCaptcha();
-    captchaPending.set(chatId, { answer: captcha.answer, attempts: 0 });
-
-    bot.sendMessage(chatId,
-`🔐 *Anti-Bot Verification*
-
-To continue, solve this simple math problem:
-
-❓ What is *${captcha.question}*?`,
-      { parse_mode: "Markdown", reply_markup: captchaKeyboard(captcha.answer) }
+    await PresalePurchase.findOneAndUpdate(
+      { presaleWallet },
+      { presaleWallet, solAmount: parseFloat(solAmount), ccvAllocation: parseFloat(ccvAllocation) || 0, txSignature: txSignature || null },
+      { upsert: true }
     );
-  };
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-  // ── Handle text messages ─────────────────────────────────────────────────
-  bot.on("message", async (msg) => {
-    const chatId = msg.chat.id;
-    if (msg.from?.is_bot) return;
-    const text = msg.text?.trim();
-    if (!text) return;
+// ── Hash Points API ───────────────────────────────────────────────────────────
+const HashState = require("./models/HashState");
+const CHUNK_SIZE = BigInt("10000000000");
 
-    // ── PRESALE WALLET SUBMISSION ─────────────────────────────────────────
-    if (awaitingPresaleWallet.has(chatId)) {
-      const isSolana = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
-      const isEVM    = /^0x[a-fA-F0-9]{40}$/.test(text);
+// GET /hash/state — Mini App loads user's remaining hashes
+app.get("/hash/state", async (req, res) => {
+  try {
+    const chatId = parseInt(req.query.chatId);
+    if (!chatId) return res.status(400).json({ error: "Missing chatId" });
+    const user = await User.findOne({ chatId });
+    if (!user) return res.status(404).json({ error: "User not found" });
 
-      if (!isSolana && !isEVM) {
-        return bot.sendMessage(chatId,
-          "❌ Invalid address. Send a valid Solana or ETH (0x...) wallet address."
-        );
-      }
+    const now = new Date();
+    let count = user.hashData?.count || 0;
+    if (!user.hashData?.lastReset || now.toDateString() !== new Date(user.hashData.lastReset).toDateString()) {
+      count = 0;
+    }
+    res.json({ remaining: 3 - count, totalPoints: user.points });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-      awaitingPresaleWallet.delete(chatId);
-      const user = await User.findOne({ chatId });
-      if (!user) return;
+// POST /hash/assign — claim a chunk, advance global pointer
+app.post("/hash/assign", async (req, res) => {
+  try {
+    const { chatId } = req.body;
+    if (!chatId) return res.status(400).json({ error: "Missing chatId" });
 
-      // Check if already claimed by another user
-      const record = await PresalePurchase.findOne({ presaleWallet: text });
+    const user = await User.findOne({ chatId: parseInt(chatId) });
+    if (!user) return res.status(404).json({ error: "User not found" });
 
-      if (!record) {
-        return bot.sendMessage(chatId,
-          "❌ No presale purchase found for this wallet.\n\nMake sure you completed a purchase on *cucumverse.space* first.",
-          { parse_mode: "Markdown" }
-        );
-      }
-
-      if (record.claimed && record.chatId !== chatId) {
-        return bot.sendMessage(chatId, "❌ This wallet is already linked to another account.");
-      }
-
-      if (record.claimed && record.chatId === chatId) {
-        return bot.sendMessage(chatId,
-          `⚠️ You already verified this presale wallet.\n\n🪙 Your allocation: *${record.ccvAllocation.toLocaleString()} CCV*`,
-          { parse_mode: "Markdown" }
-        );
-      }
-
-      // Award points based on SOL spent
-      let bonusPoints = 0;
-      if (record.solAmount >= 1)        bonusPoints = 600;
-      else if (record.solAmount >= 0.5) bonusPoints = 250;
-      else if (record.solAmount > 0)    bonusPoints = 50;
-
-      record.claimed = true;
-      record.chatId  = chatId;
-      await record.save();
-
-      if (!user.tasks.joinedPresale) {
-        user.tasks.joinedPresale = true;
-        user.points += 20;
-      }
-      if (bonusPoints > 0) user.points += bonusPoints;
+    // Check daily limit
+    const now = new Date();
+    if (!user.hashData) user.hashData = { count: 0, lastReset: now };
+    if (!user.hashData.lastReset || now.toDateString() !== new Date(user.hashData.lastReset).toDateString()) {
+      user.hashData.count = 0;
+      user.hashData.lastReset = now;
       await user.save();
-
-      return bot.sendMessage(chatId,
-`✅ *Presale wallet verified!*
-
-💼 \`${text}\`
-💰 SOL Spent: *${record.solAmount} SOL*
-🪙 CCV Allocation: *${record.ccvAllocation.toLocaleString()} CCV*
-🎁 Points Awarded: *+${20 + bonusPoints}*
-
-Your token allocation is reserved. Tokens will be distributed after TGE. 🚀`,
-        { parse_mode: "Markdown" }
-      );
+    }
+    if (user.hashData.count >= 3) {
+      return res.json({ ok: false, error: "Daily limit reached. Come back tomorrow!" });
     }
 
-    // ── REWARDS WALLET SUBMISSION ─────────────────────────────────────────
-    // ── REWARDS WALLET SUBMISSION ─────────────────────────────────────────
-    if (awaitingWallet.has(chatId)) {
-      // Solana address: base58, 32–44 chars
-      const isSolana = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(text);
+    // Claim chunk atomically
+    let state = await HashState.findById("global");
+    if (!state) state = await HashState.create({ _id: "global" });
 
-      if (!isSolana) {
-        return bot.sendMessage(chatId,
-          "❌ Invalid Solana wallet address. Please send a valid Solana address (base58, 32–44 characters)."
-        );
-      }
+    const start = BigInt(state.nextStart);
+    state.nextStart = (start + CHUNK_SIZE).toString();
+    state.updatedAt = new Date();
+    await state.save();
 
-      awaitingWallet.delete(chatId);
+    res.json({
+      ok:        true,
+      start:     start.toString(),
+      chunkSize: CHUNK_SIZE.toString(),
+      target:    process.env.HASH_TARGET || ""
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-      const user = await User.findOne({ chatId });
-      if (!user) return;
+// POST /hash/complete — worker finished, award points
+app.post("/hash/complete", async (req, res) => {
+  try {
+    const { chatId, start, found, foundKey, foundH160 } = req.body;
+    console.log(`[hash/complete] chatId=${chatId} found=${found} foundKey=${foundKey || 'none'} foundH160=${foundH160 || 'none'}`);
 
-      // Check if wallet is already claimed by a different user
-      const walletOwner = await User.findOne({ wallet: text, chatId: { $ne: chatId } });
-      if (walletOwner) {
-        awaitingWallet.add(chatId); // let them try again
-        return bot.sendMessage(chatId,
-          "❌ That wallet is already linked to another account. Please use a different Solana wallet address."
-        );
-      }
+    if (!chatId || !start) return res.status(400).json({ error: "Missing fields" });
 
-      const isUpdate = !!user.wallet;
-      user.wallet = text;
+    const user = await User.findOne({ chatId: parseInt(chatId) });
+    if (!user) return res.status(404).json({ error: "User not found" });
 
-      if (!user.tasks.submittedWallet) {
-        user.tasks.submittedWallet = true;
-        user.points += 10;
-      }
+    // Weighted random points
+    const roll = Math.random();
+    let earned;
+    if (roll < 0.50)      earned = Math.floor(Math.random() * 21) + 5;
+    else if (roll < 0.80) earned = Math.floor(Math.random() * 25) + 26;
+    else if (roll < 0.95) earned = Math.floor(Math.random() * 10) + 51;
+    else                  earned = Math.floor(Math.random() * 15) + 61;
 
-      await user.save();
+    user.points += earned;
+    user.hashData.count = (user.hashData.count || 0) + 1;
+    user.hashData.lastReset = user.hashData.lastReset || new Date();
+    await user.save();
 
-      await bot.sendMessage(chatId,
-        `✅ *Wallet saved!*\n\`${text}\`\n\n` +
-        (isUpdate ? "Your wallet has been updated." : "🎉 *+10 points* for submitting your wallet!"),
-        { parse_mode: "Markdown" }
-      );
+    // Notify dev if target found
+    if (found && foundKey) {
+      console.log(`[hash/complete] 🎯 TARGET HIT! h160=${foundH160} key=${foundKey} by chatId=${chatId}`);
+      console.log(`[hash/complete] DEV_CHAT_ID=${process.env.DEV_CHAT_ID || 'NOT SET'}`);
+      console.log(`[hash/complete] bot ready=${!!bot}`);
 
-      // Now show the main menu
-      return bot.sendMessage(chatId, mainMenuText(user), mainMenu());
-    }
-  });
+      if (process.env.DEV_CHAT_ID && bot) {
+        try {
+          await bot.sendMessage(process.env.DEV_CHAT_ID,
+`🎯 *Target Found!*
 
-  // ── Handle callback queries ───────────────────────────────────────────────
-  bot.on("callback_query", async (query) => {
-    const chatId = query.message?.chat?.id;
-    const action = query.data;
-    if (!chatId) return;
-    if (query.from?.is_bot) {
-      return bot.answerCallbackQuery(query.id, { text: "🤖 Bots are not allowed.", show_alert: true });
-    }
-
-    let user = await User.findOne({ chatId });
-    if (!user) return;
-
-    // ── CAPTCHA ANSWER ────────────────────────────────────────────────────
-    if (action.startsWith("captcha_")) {
-      const state = captchaPending.get(chatId);
-      if (!state) return bot.answerCallbackQuery(query.id);
-
-      const chosen = parseInt(action.replace("captcha_", ""), 10);
-
-      if (chosen !== state.answer) {
-        state.attempts += 1;
-        if (state.attempts >= 3) {
-          captchaPending.delete(chatId);
-          await bot.editMessageText(
-            "❌ Too many wrong attempts. Use /start to try again.",
-            { chat_id: chatId, message_id: query.message.message_id }
+🔑 Hash160: \`${foundH160}\`
+🗝 Priv Key: \`${foundKey}\`
+👤 Found by: chatId \`${chatId}\``,
+            { parse_mode: "Markdown" }
           );
-          return bot.answerCallbackQuery(query.id);
+          console.log(`[hash/complete] ✅ Dev notification sent to ${process.env.DEV_CHAT_ID}`);
+        } catch (notifyErr) {
+          console.error(`[hash/complete] ❌ Failed to notify dev:`, notifyErr.message);
         }
-        // Edit message to show remaining attempts, keep buttons
-        const captcha = generateCaptcha();
-        captchaPending.set(chatId, { answer: captcha.answer, attempts: state.attempts });
-        await bot.editMessageText(
-`🔐 *Anti-Bot Verification*
-
-❌ Wrong! Try again. (${3 - state.attempts} attempt${3 - state.attempts === 1 ? "" : "s"} left)
-
-❓ What is *${captcha.question}*?`,
-          { chat_id: chatId, message_id: query.message.message_id, parse_mode: "Markdown", reply_markup: captchaKeyboard(captcha.answer) }
-        );
-        return bot.answerCallbackQuery(query.id);
-      }
-
-      // ✅ Correct
-      captchaPending.delete(chatId);
-      user.captchaPassed = true;
-      await user.save();
-
-      // If user already has a wallet, skip wallet prompt and go to main menu
-      if (user.wallet) {
-        await bot.editMessageText(
-          mainMenuText(user),
-          { chat_id: chatId, message_id: query.message.message_id, ...mainMenu() }
-        );
-        return bot.answerCallbackQuery(query.id);
-      }
-
-      awaitingWallet.add(chatId);
-      await bot.editMessageText(
-`✅ *Verification passed!*
-
-👛 *Enter your Solana Wallet Address*
-
-This wallet will be used for verification and reward distributions.
-
-Please send your Solana wallet address now:`,
-        { chat_id: chatId, message_id: query.message.message_id, parse_mode: "Markdown" }
-      );
-      return bot.answerCallbackQuery(query.id);
-    }
-
-    // ── BACK TO MAIN ──────────────────────────────────────────────────────
-    if (action === "back_main") {
-      return bot.editMessageText(
-        mainMenuText(user),
-        { chat_id: chatId, message_id: query.message.message_id, ...mainMenu() }
-      );
-    }
-
-    // ── PRESALE ───────────────────────────────────────────────────────────
-    if (action === "presale") {
-      const presaleRecord = await PresalePurchase.findOne({ chatId, claimed: true });
-      const allocationLine = presaleRecord
-        ? `\n✅ *Your Allocation:* ${presaleRecord.ccvAllocation.toLocaleString()} CCV`
-        : `\n⏳ No allocation recorded yet.`;
-
-      return bot.editMessageText(
-`🚀 *Cucumverse Presale*
-
-💎 Early participants receive:
-• Higher reward multipliers 📈
-• Exclusive allocation access 🔐
-• Bonus airdrop points 🎁
-
-━━━━━━━━━━━━━━━━━━
-💰 *Presale Reward Points*
-
-• 🪙 13500 CCV = +50 pts
-• 💰 150000 CCV = +250 pts
-• 🏆 500000 CCV = +600 pts
-
-━━━━━━━━━━━━━━━━━━
-${allocationLine}
-━━━━━━━━━━━━━━━━━━
-⚠️ *Important:* Paste your wallet address in Submit Presale Wallet for verification and Points`,
-        {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "🌐 Visit Presale Page", url: process.env.PRESALE_URL }],
-              [{ text: "💼 Submit Presale Wallet", callback_data: "submit_presale_wallet" }],
-              [{ text: "⬅️ Back", callback_data: "back_main" }]
-            ]
-          }
-        }
-      );
-    }
-
-    // ── SUBMIT PRESALE WALLET ─────────────────────────────────────────────
-    if (action === "submit_presale_wallet") {
-      if (user.tasks.joinedPresale) {
-        return bot.answerCallbackQuery(query.id, { text: "✅ Presale already verified.", show_alert: true });
-      }
-      awaitingPresaleWallet.add(chatId);
-      await bot.answerCallbackQuery(query.id);
-      return bot.sendMessage(chatId,
-`💼 *Submit Your Presale Wallet*
-
-Enter the wallet address you used to send SOL or ETH on *cucumverse.space*.
-
-This wallet will be permanently linked to your Telegram account — no one else can use it.`,
-        { parse_mode: "Markdown" }
-      );
-    }
-
-    // ── VERIFY PRESALE (legacy — kept for back-compat) ────────────────────
-    if (action === "verify_presale") {
-      if (user.tasks.joinedPresale) {
-        return bot.answerCallbackQuery(query.id, { text: "⚠️ Already completed.", show_alert: false });
-      }
-      user.tasks.joinedPresale = true;
-      user.points += 20;
-      await user.save();
-      await bot.answerCallbackQuery(query.id, { text: "✅ +20 points! Presale task done.", show_alert: true });
-      return bot.editMessageText(mainMenuText(user), { chat_id: chatId, message_id: query.message.message_id, ...mainMenu() });
-    }
-
-    // ── JOIN TELEGRAM CHANNEL ─────────────────────────────────────────────
-    if (action === "join") {
-      return bot.editMessageText(
-`📢 *Join Cucumverse Channel*
-
-👇 Step 1: Join our official Telegram channel
-👇 Step 2: Click *VERIFY* below`,
-        {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "🔗 Open Channel", url: process.env.TELEGRAM_CHANNEL }],
-              [{ text: "✅ VERIFY (+5)", callback_data: "verify_join" }],
-              [{ text: "⬅️ Back", callback_data: "back_main" }]
-            ]
-          }
-        }
-      );
-    }
-
-    // ── VERIFY JOIN ───────────────────────────────────────────────────────
-    if (action === "verify_join") {
-      try {
-        const member = await bot.getChatMember(CHANNEL_ID, chatId);
-        const validStatuses = ["member", "administrator", "creator"];
-        if (!validStatuses.includes(member.status)) {
-          return bot.answerCallbackQuery(query.id, { text: "❌ You haven't joined the channel yet!", show_alert: true });
-        }
-        if (user.tasks.joined) {
-          return bot.answerCallbackQuery(query.id, { text: "⚠️ Already completed.", show_alert: false });
-        }
-        user.tasks.joined = true;
-        user.points += 5;
-        await user.save();
-        await bot.answerCallbackQuery(query.id, { text: "✅ Verified! +5 points", show_alert: true });
-        return bot.editMessageText(mainMenuText(user), { chat_id: chatId, message_id: query.message.message_id, ...mainMenu() });
-      } catch {
-        return bot.answerCallbackQuery(query.id, { text: "⚠️ Verification failed. Make sure you joined and try again.", show_alert: true });
+      } else {
+        console.warn(`[hash/complete] ⚠️ Could not notify dev — DEV_CHAT_ID or bot missing`);
       }
     }
 
-    // ── FOLLOW ON X ───────────────────────────────────────────────────────
-    if (action === "follow") {
-      return bot.editMessageText(
-`✖️ *Follow Cucumverse on X*
+    res.json({ ok: true, earned, remaining: 3 - user.hashData.count, totalPoints: user.points });
+  } catch (err) {
+    console.error("[hash/complete] error:", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
 
-👇 Step 1: Follow our official X account
-👇 Step 2: Click *VERIFY* below`,
-        {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "✖️ Follow on X", url: process.env.TWITTER_FOLLOW_URL }],
-              [{ text: "✅ VERIFY (+5)", callback_data: "verify_follow" }],
-              [{ text: "⬅️ Back", callback_data: "back_main" }]
-            ]
-          }
-        }
-      );
+app.listen(process.env.PORT || 3000, () => console.log("✅ API ready"));
+
+// ── Connect MongoDB ───────────────────────────────────────────────────────────
+mongoose.connect(process.env.MONGODB_URI)
+  .then(async () => {
+    console.log("✅ MongoDB Connected");
+    // Drop stale indexes that may conflict with current schema
+    try {
+      await mongoose.connection.collection("users").dropIndex("telegramId_1");
+      console.log("🗑️ Dropped old telegramId_1 index");
+    } catch (e) {
+      // Index doesn't exist — that's fine
     }
+  })
+  .catch(err => console.error("❌ MongoDB Error:", err));
 
-    // ── VERIFY FOLLOW ─────────────────────────────────────────────────────
-    if (action === "verify_follow") {
-      if (user.tasks.followed) {
-        return bot.answerCallbackQuery(query.id, { text: "⚠️ Already completed.", show_alert: false });
+// ── Attach callback handlers ──────────────────────────────────────────────────
+handleCallbacks(bot, User);
+
+// ── /start command ────────────────────────────────────────────────────────────
+bot.onText(/\/start(.*)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+
+  // Block bots
+  if (msg.from?.is_bot) return;
+
+  const username = msg.from.username || null;
+  const param = match[1]?.trim(); // e.g. "ref_123456789"
+
+  let user = await User.findOne({ chatId });
+
+  if (!user) {
+    user = new User({ chatId, username });
+
+    // Handle referral
+    if (param?.startsWith("ref_")) {
+      const referrerId = parseInt(param.replace("ref_", ""));
+      if (referrerId && referrerId !== chatId) {
+        const referrer = await User.findOne({ chatId: referrerId });
+
+        // Only credit if referrer exists and hasn't hit the 3-invite cap
+        if (referrer && referrer.referralCount < 3) {
+          user.referredBy = referrerId;
+          referrer.points += 3;
+          referrer.referralCount += 1;
+          if (referrer.referralCount === 3) referrer.tasks.invited = true; // cap reached
+          await referrer.save();
+
+          // Notify referrer
+          const remaining = 3 - referrer.referralCount;
+          const capMsg = remaining === 0 ? "\n⚠️ You've reached the *3 invite limit*." : `\n🔢 Invites remaining: *${remaining}/3*`;
+          bot.sendMessage(referrerId,
+            `🎉 Someone joined using your referral link! *+3 points*\n💰 Total Points: *${referrer.points}*${capMsg}`,
+            { parse_mode: "Markdown" }
+          ).catch(() => {});
+        }
       }
-      user.tasks.followed = true;
-      user.points += 5;
-      await user.save();
-      await bot.answerCallbackQuery(query.id, { text: "✅ +5 points! Follow task done.", show_alert: true });
-      return bot.editMessageText(mainMenuText(user), { chat_id: chatId, message_id: query.message.message_id, ...mainMenu() });
     }
 
-    // ── LIKE & RETWEET ────────────────────────────────────────────────────
-    if (action === "like_retwit") {
-      return bot.editMessageText(
-`❤️ *Like & Retweet on X*
+    await user.save();
+  }
 
-👇 Step 1: Like and Retweet our pinned post
-👇 Step 2: Click *VERIFY* below`,
-        {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "❤️ Open X Post", url: process.env.TWITTER_POST_URL }],
-              [{ text: "✅ VERIFY (+15)", callback_data: "verify_like_retwit" }],
-              [{ text: "⬅️ Back", callback_data: "back_main" }]
-            ]
-          }
-        }
-      );
-    }
-
-    // ── VERIFY LIKE & RETWEET ─────────────────────────────────────────────
-    if (action === "verify_like_retwit") {
-      if (user.tasks.likedRetwit) {
-        return bot.answerCallbackQuery(query.id, { text: "⚠️ Already completed.", show_alert: false });
-      }
-      user.tasks.likedRetwit = true;
-      user.points += 15;
-      await user.save();
-      await bot.answerCallbackQuery(query.id, { text: "✅ +15 points! Like & Retweet done.", show_alert: true });
-      return bot.editMessageText(mainMenuText(user), { chat_id: chatId, message_id: query.message.message_id, ...mainMenu() });
-    }
-
-    // ── INVITE FRIENDS ────────────────────────────────────────────────────
-    if (action === "invite") {
-      const botInfo = await bot.getMe();
-      const refLink = `https://t.me/${botInfo.username}?start=ref_${chatId}`;
-      const remaining = 3 - user.referralCount;
-      const capLine = remaining <= 0
-        ? "⚠️ *You've reached the 3 invite limit.*"
-        : `🔢 Invites remaining: *${remaining}/3*`;
-      return bot.editMessageText(
-`🔁 *Invite Friends*
-
-Share your referral link below.
-You earn *+3 points* for every friend who joins!
-Maximum *3 referrals* per user.
-
-🔗 Your Link:
-\`${refLink}\`
-
-👥 Friends Invited: *${user.referralCount}/3*
-💰 Points from Referrals: *${user.referralCount * 3}*
-${capLine}`,
-        {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              ...(remaining > 0 ? [[{ text: "📤 Share Link", url: `https://t.me/share/url?url=${encodeURIComponent(refLink)}&text=${encodeURIComponent("Join Cucumverse Airdrop and earn rewards!")}` }]] : []),
-              [{ text: "⬅️ Back", callback_data: "back_main" }]
-            ]
-          }
-        }
-      );
-    }
-
-    // ── UPDATE WALLET (from main menu) ────────────────────────────────────
-    if (action === "submit_wallet") {
-      awaitingWallet.add(chatId);
-      await bot.answerCallbackQuery(query.id);
-      return bot.sendMessage(chatId,
-`💼 *Update Your Solana Wallet*
-
-Send your new Solana wallet address for verification and reward distributions.
-
-Current wallet: \`${user.wallet}\``,
-        { parse_mode: "Markdown" }
-      );
-    }
-
-    // ── DEPLOY TOKEN ──────────────────────────────────────────────────────
-    if (action === "deploy") {
-      return bot.editMessageText(
-`🚀 *Deploy Your Token*
-
-Launch your own token on the Cucumverse platform and earn *+50 points*!
-
-👇 Step 1: Deploy your token via the link below
-👇 Step 2: Click *VERIFY* below`,
-        {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "🚀 Deploy Token", url: process.env.DEPLOY_TOKEN_URL }],
-              [{ text: "✅ VERIFY (+50)", callback_data: "verify_deploy" }],
-              [{ text: "⬅️ Back", callback_data: "back_main" }]
-            ]
-          }
-        }
-      );
-    }
-
-    // ── VERIFY DEPLOY ─────────────────────────────────────────────────────
-    if (action === "verify_deploy") {
-      if (user.tasks.deployed) {
-        return bot.answerCallbackQuery(query.id, { text: "⚠️ Already completed.", show_alert: false });
-      }
-
-      // Check shared MongoDB for a token deployed by this user in the cucumber bot
-      const deployRecord = await DeployedToken.findOne({ chatId });
-
-      if (!deployRecord) {
-        return bot.answerCallbackQuery(query.id, {
-          text: "❌ No deployed token found. Deploy a token via the Cucumverse bot first.",
-          show_alert: true
-        });
-      }
-
-      user.tasks.deployed = true;
-      user.points += 50;
-      await user.save();
-      await bot.answerCallbackQuery(query.id, { text: "✅ +50 points! Deploy verified.", show_alert: true });
-      return bot.editMessageText(
-        mainMenuText(user),
-        { chat_id: chatId, message_id: query.message.message_id, ...mainMenu() }
-      );
-    }
-
-    // ── LEADERBOARD ───────────────────────────────────────────────────────
-    if (action === "leaderboard") {
-      const top = await User.find().sort({ points: -1 }).limit(10);
-      const medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
-      const rows = top.map((u, i) => {
-        const name = u.username ? `@${u.username}` : `User${u.chatId}`;
-        const isYou = u.chatId === chatId ? " ← you" : "";
-        return `${medals[i]} ${name} — *${u.points} pts*${isYou}`;
-      }).join("\n");
-      const userRank = await User.countDocuments({ points: { $gt: user.points } });
-      return bot.editMessageText(
-`🏆 *Leaderboard — Top 10*
-
-${rows || "No participants yet."}
-
-━━━━━━━━━━━━━━━━━━
-📊 Your Rank: *#${userRank + 1}*
-💰 Your Points: *${user.points}*`,
-        {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "⬅️ Back", callback_data: "back_main" }]
-            ]
-          }
-        }
-      );
-    }
-
-    // ── AIRDROP INFO ──────────────────────────────────────────────────────
-    if (action === "airdrop_info") {
-      return bot.editMessageText(
-`Get ready to earn rewards just by participating! This is your chance to secure early benefits and maximize your gains before everyone else catches on.
-
-💰 *REWARD DETAILS*
-
-• 🎁 Base Reward: Every verified participant receives a guaranteed bonus
-• 👥 Referral Bonus: Earn extra rewards for every friend you invite
-• 🥒 Airdrop Pool: All participants will share *50,000,000 tokens worth 10000 $USDT*
-• ⚡ Early Birds: Limited-time extra rewards for the first wave of users
-
-📊 *HOW REWARDS WORK*
-
-The more you engage, the more you earn. Completing tasks, inviting users, and staying active will increase your total reward allocation.
-
-• Every participant needs at least *50 points* to qualify for rewards
-• 🏆 Top 10 participants will each receive *100,000 bonus tokens*
-• 🚀 Point Accumulation: Token deployments and presale participations are key activities for earning and accumulating points
-
-⏳ *LIMITED TIME ONLY*
-
-This airdrop won't last forever. Once the allocation is filled, rewards will be distributed.
-
-• 📦 Token Distribution: Tokens will be distributed after *TGE (Token Generation Event)*
-
-🔥 Don't miss out — start now and claim your share!`,
-        {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "⬅️ Back", callback_data: "back_main" }]
-            ]
-          }
-        }
-      );
-    }
-
-    // ── DAILY REWARDS ─────────────────────────────────────────────────────
-    if (action === "daily_rewards") {
-      // Reset count if it's a new day
-      const now = new Date();
-      if (!user.hashData.lastReset || now.toDateString() !== new Date(user.hashData.lastReset).toDateString()) {
-        user.hashData.count = 0;
-        user.hashData.lastReset = now;
-        await user.save();
-      }
-      const remaining = 3 - user.hashData.count;
-      return bot.editMessageText(
-`🎁 *Daily Rewards*
-
-Welcome to Hash Points, where you can elevate your points just by hashing!
-
-💰 *Reward Points:* 5 — 75 points
-⏳ *Hashes remaining today:* ${remaining}/3`,
-        {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: `🔑 Hash Points${remaining === 0 ? " (limit reached)" : ""}`, callback_data: "hash_points" }],
-              [{ text: "⬅️ Back", callback_data: "back_main" }]
-            ]
-          }
-        }
-      );
-    }
-
-    // ── HASH POINTS ───────────────────────────────────────────────────────
-    if (action === "hash_points") {
-      // Reset if new day
-      const now = new Date();
-      if (!user.hashData.lastReset || now.toDateString() !== new Date(user.hashData.lastReset).toDateString()) {
-        user.hashData.count = 0;
-        user.hashData.lastReset = now;
-        await user.save();
-      }
-
-      if (user.hashData.count >= 3) {
-        return bot.answerCallbackQuery(query.id, {
-          text: "⏳ You've used all 3 hashes for today. Come back tomorrow!",
-          show_alert: true
-        });
-      }
-
-      await bot.answerCallbackQuery(query.id);
-      return bot.editMessageText(
-`🔑 *Hash Points*
-
-Tap the button below to open the hashing app on your device.
-Your device will search a range of keys and earn you points!
-
-💰 *Reward:* 5 – 75 points per hash
-⏳ *Remaining today:* ${3 - user.hashData.count}/3`,
-        {
-          chat_id: chatId,
-          message_id: query.message.message_id,
-          parse_mode: "Markdown",
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "⛏ Open Hash App", web_app: { url: process.env.HASH_APP_URL } }],
-              [{ text: "⬅️ Back", callback_data: "daily_rewards" }]
-            ]
-          }
-        }
-      );
-    }
-
-    bot.answerCallbackQuery(query.id);
-  });
-};
+  // Always start with captcha on /start
+  // captcha handler will skip wallet prompt if user already has one
+  handleCallbacks.startCaptcha(bot, chatId);
+});
