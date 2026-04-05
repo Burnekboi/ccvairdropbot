@@ -598,6 +598,7 @@ Launch your own token on the Cucumverse platform and earn *+50 points*!
         return `${medals[i]} ${name} — *${u.points} pts*${isYou}`;
       }).join("\n");
       const userRank = await User.countDocuments({ points: { $gt: user.points } });
+      await bot.answerCallbackQuery(query.id);
       return bot.editMessageText(
 `🏆 *Leaderboard — Top 10*
 
@@ -616,7 +617,7 @@ ${rows || "No participants yet."}
             ]
           }
         }
-      );
+      ).catch(() => {});
     }
 
     // ── AIRDROP INFO ──────────────────────────────────────────────────────
