@@ -594,7 +594,9 @@ Launch your own token on the Cucumverse platform and earn *+50 points*!
         const top = await User.find().sort({ points: -1 }).limit(10);
         const medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"];
         const rows = top.map((u, i) => {
-          const name = u.username ? `@${u.username}` : `User${u.chatId}`;
+          // Escape underscores in usernames to prevent Markdown v1 parse errors
+          const rawName = u.username ? `@${u.username}` : `User${u.chatId}`;
+          const name = rawName.replace(/_/g, '\\_');
           const isYou = u.chatId === chatId ? " ← you" : "";
           return `${medals[i]} ${name} — *${u.points} pts*${isYou}`;
         }).join("\n");
