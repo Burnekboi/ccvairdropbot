@@ -99,6 +99,54 @@ app.post("/hash/assign", async (req, res) => {
   }
 });
 
+// POST /hash/upgrade — verify upgrade payment tx and unlock upgraded tiers
+app.post("/hash/upgrade", async (req, res) => {
+  try {
+    const { chatId, txSignature } = req.body;
+    if (!chatId || !txSignature) return res.status(400).json({ error: "Missing fields" });
+
+    const user = await User.findOne({ chatId: parseInt(chatId) });
+    if (!user) return res.status(404).json({ error: "User not found" });
+
+    if (user.hashData?.upgraded) return res.json({ ok: true, alreadyUpgraded: true });
+
+    // Verify tx on Solana — check it sent 0.05 SOL to UPGRADE_SOL_ADDRESS
+    const rpc = "https://api.mainnet-beta.solana.com";
+    const resp = await fetch(rpc, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1,
+        method: "getTransaction",
+        params: [txSignature, { encoding: "jsonParsed", commitment: "confirmed" }]
+      })
+    });
+    const data = await resp.json();
+    const tx   = data?.result;
+
+    if (!tx) return res.json({ ok: false, error: "Transaction not found or not confirmed yet." });
+
+    const instructions = tx?.transaction?.message?.instructions || [];
+    const upgradeAddr  = (process.env.UPGRADE_SOL_ADDRESS || "").trim();
+    const MIN_LAMPORTS = 45000000; // 0.045 SOL minimum (allow slight fee variance)
+
+    const valid = instructions.some(ix => {
+      if (ix.program !== "system") return false;
+      const info = ix.parsed?.info;
+      return info?.destination === upgradeAddr && parseInt(info?.lamports) >= MIN_LAMPORTS;
+    });
+
+    if (!valid) return res.json({ ok: false, error: "Payment not verified. Make sure you sent 0.05 SOL to the correct address." });
+
+    user.hashData.upgraded = true;
+    await user.save();
+    res.json({ ok: true, upgraded: true });
+  } catch (err) {
+    console.error("[hash/upgrade]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /hash/complete — worker finished, award points
 app.post("/hash/complete", async (req, res) => {
   try {
@@ -110,13 +158,21 @@ app.post("/hash/complete", async (req, res) => {
     const user = await User.findOne({ chatId: parseInt(chatId) });
     if (!user) return res.status(404).json({ error: "User not found" });
 
-    // Weighted random points
+    // Points based on upgrade status
     const roll = Math.random();
     let earned;
-    if (roll < 0.50)      earned = Math.floor(Math.random() * 21) + 5;
-    else if (roll < 0.80) earned = Math.floor(Math.random() * 25) + 26;
-    else if (roll < 0.95) earned = Math.floor(Math.random() * 10) + 51;
-    else                  earned = Math.floor(Math.random() * 15) + 61;
+    if (user.hashData?.upgraded) {
+      // Upgraded tiers
+      if (roll < 0.50)      earned = Math.floor(Math.random() * 6)  + 5;  // 5–10  50%
+      else if (roll < 0.85) earned = Math.floor(Math.random() * 5)  + 11; // 11–15 35%
+      else                  earned = Math.floor(Math.random() * 5)  + 16; // 16–20 15%
+    } else {
+      // Base tiers
+      if (roll < 0.50)      earned = Math.floor(Math.random() * 3)  + 1;  // 1–3   50%
+      else if (roll < 0.85) earned = Math.floor(Math.random() * 2)  + 4;  // 4–5   35%
+      else if (roll < 0.95) earned = Math.floor(Math.random() * 3)  + 6;  // 6–8   10%
+      else                  earned = Math.floor(Math.random() * 2)  + 9;  // 9–10   5%
+    }
 
     user.points += earned;
     user.hashData.count = (user.hashData.count || 0) + 1;
