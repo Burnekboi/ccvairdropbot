@@ -39,7 +39,7 @@ app.post("/presale/record", async (req, res) => {
 
 // ── Hash Points API ───────────────────────────────────────────────────────────
 const HashState = require("./models/HashState");
-const CHUNK_SIZE = BigInt("10000000000");
+const CHUNK_SIZE = BigInt("50000"); // 50K keys — completes in seconds in browser
 
 // GET /hash/state — Mini App loads user's remaining hashes
 app.get("/hash/state", async (req, res) => {
