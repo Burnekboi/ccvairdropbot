@@ -8,6 +8,11 @@ const userSchema = new mongoose.Schema({
 
   captchaPassed: { type: Boolean, default: false },
 
+  hashData: {
+    count:     { type: Number, default: 0 },  // hashes done today
+    lastReset: { type: Date,   default: null } // last daily reset
+  },
+
   referredBy:   { type: Number, default: null },
   referralCount: { type: Number, default: 0 },
 
